@@ -1,7 +1,7 @@
 // src/components/features/RoastLog/RoastLogList.tsx
 
 import React from 'react';
-import { RoastLog } from '../../../types/roast'; // RoastLog型をインポート
+import type { RoastLog } from '../../../types/roast'; // RoastLog型をインポート
 
 interface RoastLogListProps {
   logs: RoastLog[]; // 表示するログの配列

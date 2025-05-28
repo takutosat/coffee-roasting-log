@@ -1,7 +1,7 @@
 // src/components/features/RoastLog/RoastLogForm.tsx
 
 import React from 'react';
-import { RoastLog } from '../../../types/roast'; // RoastLog型をインポート
+import type { RoastLog } from '../../../types/roast'; // RoastLog型をインポート
 
 interface RoastLogFormProps {
   onSubmit: (log: Omit<RoastLog, 'id'>) => void; // idは自動生成するのでOmitで除外
