@@ -7,6 +7,8 @@ import { signInWithPopup, GoogleAuthProvider, signOut, onAuthStateChanged } from
 import type { User } from 'firebase/auth';
 import { collection, addDoc, getDocs, updateDoc, deleteDoc, doc, query, where } from 'firebase/firestore';
 import type { TemperaturePoint, RoastProfile, RoastProfileFormData } from './types/RoastProfile';
+import ShareProfileModal from './components/ShareProfileModal';
+import { Button } from './components/Button';
 
 // ★状態管理のためのカスタムフックをFirestore対応に更新
 // ログインユーザーの情報を引数として受け取るように変更
@@ -188,37 +190,6 @@ const useStopwatch = () => {
   };
 
   return { time, isRunning, start, pause, reset, formatTime };
-};
-
-// 再利用可能なボタンコンポーネント
-const Button = ({ children, onClick, variant = 'primary', size = 'md', disabled = false, ...props }) => {
-  // 基本的なスタイルクラス
-  const baseClasses = 'font-medium rounded-lg transition-colors duration-200 flex items-center justify-center gap-2';
-  
-  // バリアント（色）ごとのスタイル
-  const variants = {
-    primary: 'bg-amber-600 hover:bg-amber-700 text-white disabled:bg-gray-400',
-    secondary: 'bg-gray-200 hover:bg-gray-300 text-gray-800 disabled:bg-gray-100',
-    danger: 'bg-red-600 hover:bg-red-700 text-white disabled:bg-gray-400'
-  };
-  
-  // サイズごとのスタイル
-  const sizes = {
-    sm: 'px-3 py-1.5 text-sm',
-    md: 'px-4 py-2',
-    lg: 'px-6 py-3 text-lg'
-  };
-
-  return (
-    <button
-      className={`${baseClasses} ${variants[variant]} ${sizes[size]}`}
-      onClick={onClick}
-      disabled={disabled}
-      {...props}
-    >
-      {children}
-    </button>
-  );
 };
 
 // 再利用可能な入力フィールドコンポーネント
@@ -435,10 +406,11 @@ interface RoastHistoryListProps {
   onDelete: (id: string) => void;
   onViewChart: (profile: RoastProfile) => void; // チャート表示用
   onAddFlavorNotes: (profile: RoastProfile) => void; // ★味の感想追加用
+  onShare: (profileId: string) => void;
 }
 
 // 焙煎履歴一覧コンポーネント
-const RoastHistoryList = ({ profiles, onEdit, onDelete, onViewChart, onAddFlavorNotes }: RoastHistoryListProps) => { // 型を追加
+const RoastHistoryList = ({ profiles, onEdit, onDelete, onViewChart, onAddFlavorNotes, onShare }: RoastHistoryListProps) => { // 型を追加
   // 日付を整形するヘルパー関数
   const formatDate = (date: Date) => { // 型を追加
     return new Date(date).toLocaleDateString('ja-JP', {
@@ -475,6 +447,9 @@ const RoastHistoryList = ({ profiles, onEdit, onDelete, onViewChart, onAddFlavor
                   </Button>
                   <Button size="sm" variant="secondary" onClick={() => onViewChart(profile)} disabled={profile.temperatureLog.length === 0}> {/* チャート表示ボタン */}
                     チャート表示
+                  </Button>
+                  <Button size="sm" variant="secondary" onClick={() => onShare(profile.id)}>
+                   共有
                   </Button>
                   <Button size="sm" variant="secondary" onClick={() => onEdit(profile)}>
                     編集
@@ -624,6 +599,15 @@ const CoffeeRoastingApp = () => {
   const [temperatureLog, setTemperatureLog] = useState<TemperaturePoint[]>([]);
   // アクティブなタブ（'roast', 'history', 'profile'）
   const [activeTab, setActiveTab] = useState('roast');
+  const [shareProfileId, setShareProfileId] = useState<string | null>(null);
+
+  const handleShareProfile = (profileId: string) => {
+    setShareProfileId(profileId);
+  };
+
+  const handleCloseShareModal = () => {
+    setShareProfileId(null);
+  };
 
   useEffect(() => {
     // Firebase Authenticationの認証状態の変更を監視
@@ -938,6 +922,7 @@ const handleSignOut = async () => {
             onDelete={deleteProfile}
             onViewChart={handleViewChart}
             onAddFlavorNotes={handleAddFlavorNotes} // ★新しいpropを渡す
+            onShare={handleShareProfile}
           />
         )}
 
@@ -999,6 +984,11 @@ const handleSignOut = async () => {
           onSave={handleSaveFlavorNotes}
           onClose={handleCloseFlavorNotesModal}
         />
+      )}
+
+      {/* ★この共有モーダルを追加します */}
+      {shareProfileId && (
+        <ShareProfileModal profileId={shareProfileId} onClose={handleCloseShareModal} />
       )}
     </div>
   );
