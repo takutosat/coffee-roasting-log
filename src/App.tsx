@@ -2,6 +2,8 @@ import React, { useState, useEffect, useRef } from 'react';
 import { Timer, Play, Pause, Square, Plus, Download, Upload, Coffee, TrendingUp, Clock, Thermometer, X, MessageSquare } from 'lucide-react'; // MessageSquareアイコンを追加
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts';
 import { v4 as uuidv4 } from 'uuid'; // ID 生成のために
+import { db } from './firebase';
+import { collection, addDoc, getDocs } from 'firebase/firestore';
 
 // 型定義
 // 温度記録の各ポイントの型定義
@@ -546,6 +548,64 @@ const FlavorNotesModal = ({ profile, onSave, onClose }: FlavorNotesModalProps) =
 
 
 // メインアプリケーションコンポーネント
+const FirebaseTest = () => {
+  const [testData, setTestData] = useState<string[]>([]);
+  const [input, setInput] = useState('');
+
+  useEffect(() => {
+    const fetchData = async () => {
+      try {
+        const querySnapshot = await getDocs(collection(db, "test_collection"));
+        const data: string[] = [];
+        querySnapshot.forEach((doc) => {
+          data.push(doc.data().message);
+        });
+        setTestData(data);
+      } catch (e) {
+        console.error("Error fetching documents: ", e);
+      }
+    };
+    fetchData();
+  }, []);
+
+  const addMessage = async () => {
+    if (input.trim() === '') return;
+    try {
+      const docRef = await addDoc(collection(db, "test_collection"), {
+        message: input,
+        timestamp: new Date()
+      });
+      console.log("Document written with ID: ", docRef.id);
+      setTestData(prev => [...prev, input]);
+      setInput('');
+    } catch (e) {
+      console.error("Error adding document: ", e);
+    }
+  };
+
+  return (
+    <Card title="Firebase テスト (一時的)">
+      <div className="flex flex-col gap-4">
+        <Input
+          value={input}
+          onChange={(e) => setInput(e.target.value)}
+          placeholder="ここにメッセージを入力"
+        />
+        <Button onClick={addMessage}>Firestoreに保存</Button>
+        <h4 className="font-semibold mt-4">Firestoreのメッセージ:</h4>
+        {testData.length > 0 ? (
+          <ul className="list-disc list-inside">
+            {testData.map((msg, index) => (
+              <li key={index}>{msg}</li>
+            ))}
+          </ul>
+        ) : (
+          <p className="text-gray-500">まだメッセージがありません。</p>
+        )}
+      </div>
+    </Card>
+  );
+};
 const CoffeeRoastingApp = () => {
   // 焙煎プロファイルのストアから状態と関数を取得
   const { profiles, addProfile, updateProfile, deleteProfile } = useRoastStore();
@@ -740,6 +800,7 @@ const CoffeeRoastingApp = () => {
 
       {/* メインコンテンツ */}
       <main className="max-w-6xl mx-auto px-4 py-8">
+        <FirebaseTest />
         {activeTab === 'roast' && (
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
             <div>
