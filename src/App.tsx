@@ -2,7 +2,9 @@ import React, { useState, useEffect, useRef } from 'react';
 import { Timer, Play, Pause, Square, Plus, Download, Upload, Coffee, TrendingUp, Clock, Thermometer, X, MessageSquare } from 'lucide-react'; // MessageSquareアイコンを追加
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts';
 import { v4 as uuidv4 } from 'uuid'; // ID 生成のために
-import { db } from './firebase';
+import { auth, db } from './firebase';
+import { signInWithPopup, GoogleAuthProvider, signOut, onAuthStateChanged } from 'firebase/auth';
+import type { User } from 'firebase/auth';
 import { collection, addDoc, getDocs } from 'firebase/firestore';
 
 // 型定義
@@ -618,6 +620,47 @@ const CoffeeRoastingApp = () => {
   const [temperatureLog, setTemperatureLog] = useState<TemperaturePoint[]>([]);
   // アクティブなタブ（'roast', 'history', 'profile'）
   const [activeTab, setActiveTab] = useState('roast');
+
+  const [user, setUser] = useState<User | null>(null);
+  useEffect(() => {
+    // Firebase Authenticationの認証状態の変更を監視
+    // onAuthStateChanged は、認証状態が変わるたびに呼び出されるリスナーを設定します。
+    // アプリの初期ロード時にも現在の認証状態が通知されます。
+    const unsubscribe = onAuthStateChanged(auth, (currentUser) => {
+      setUser(currentUser); // ユーザーがログインしていれば currentUser が Userオブジェクト、ログアウトしていれば null
+      // ここで、ユーザーがログインしている場合にのみFirestoreからデータを読み込むロジックを後で追加します。
+      // (現在はFirebaseTestコンポーネントがテスト用としてFirestoreに直接アクセスしていますが、
+      // 実際にはログインしているユーザーのデータのみを読み込むように変更します)
+    });
+
+    // コンポーネントがアンマウントされる（画面から消える）ときに、
+    // メモリリークを防ぐために監視を解除します。
+    return () => unsubscribe();
+  }, []); // 依存配列が空なので、このuseEffectはコンポーネントがマウントされた時に一度だけ実行され、
+          // その後の再レンダーでは再実行されません。（認証状態の変更はonAuthStateChangedが監視するため）
+  // Googleでサインインする関数
+const handleGoogleSignIn = async () => {
+  const provider = new GoogleAuthProvider(); // Google認証プロバイダをインスタンス化
+  try {
+    await signInWithPopup(auth, provider); // ポップアップでサインイン
+    // ログイン成功時に特別な処理がなければ、ここで何もしなくてもOK
+    console.log("Googleサインイン成功！");
+  } catch (error) {
+    console.error("Googleサインインエラー: ", error);
+    alert("Googleサインイン中にエラーが発生しました。");
+  }
+};
+
+// サインアウトする関数
+const handleSignOut = async () => {
+  try {
+    await signOut(auth); // サインアウト
+    console.log("サインアウト成功！");
+  } catch (error) {
+    console.error("サインアウトエラー: ", error);
+    alert("サインアウト中にエラーが発生しました。");
+  }
+};        
   // プロファイル作成フォームの表示/非表示
   const [showProfileForm, setShowProfileForm] = useState(false);
   // 編集中のプロファイルデータ
@@ -752,22 +795,30 @@ const CoffeeRoastingApp = () => {
     <div className="min-h-screen bg-gray-50 font-sans text-gray-900">
       {/* ヘッダー */}
       <header className="bg-white shadow-sm border-b">
-        <div className="max-w-6xl mx-auto px-4 py-4">
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-3">
-              <Coffee className="text-amber-600" size={32} />
-              <h1 className="text-2xl font-bold text-gray-800">コーヒー焙煎ログ</h1>
-            </div>
-            
-            <div className="flex gap-2">
-              <Button variant="secondary" onClick={exportData}>
-                <Download size={16} />
-                エクスポート
+        <div className="max-w-6xl mx-auto px-4 py-4 flex justify-between items-center">
+          <h1 className="text-2xl font-bold text-gray-800">☕️ コーヒー焙煎ログ</h1>
+          <div className="flex items-center space-x-4">
+            {user ? (
+              <>
+                <span className="text-gray-600 text-sm">
+                  {user.displayName ? user.displayName : user.email} でログイン中
+                </span>
+                <Button onClick={handleSignOut} variant="secondary" size="md">
+                  ログアウト
+                </Button>
+              </>
+            ) : (
+              <Button onClick={handleGoogleSignIn} variant="primary" size="md">
+                Googleでログイン
               </Button>
-            </div>
+            )}
+            <Button onClick={() => alert('エクスポート機能はまだ開発中です！')} variant="secondary" size="md">
+              エクスポート
+            </Button>
           </div>
         </div>
       </header>
+
 
       {/* ナビゲーション */}
       <nav className="bg-white border-b">
