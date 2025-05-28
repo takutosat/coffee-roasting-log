@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Timer, Play, Pause, Square, Plus, Download, Upload, Coffee, TrendingUp, Clock, Thermometer, X, MessageSquare } from 'lucide-react'; // MessageSquareアイコンを追加
+import { Timer, Play, Pause, Square, Plus, Download, Upload, Coffee, TrendingUp, Clock, Thermometer, X, MessageSquare,Star } from 'lucide-react'; // MessageSquareアイコンを追加
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts';
 import { v4 as uuidv4 } from 'uuid'; // ID 生成のために
 import { auth, db } from './firebase';
@@ -407,10 +407,11 @@ interface RoastHistoryListProps {
   onViewChart: (profile: RoastProfile) => void; // チャート表示用
   onAddFlavorNotes: (profile: RoastProfile) => void; // ★味の感想追加用
   onShare: (profileId: string) => void;
+  onToggleFavorite: (profileId: string, currentFavoriteStatus: boolean) => Promise<void>;
 }
 
 // 焙煎履歴一覧コンポーネント
-const RoastHistoryList = ({ profiles, onEdit, onDelete, onViewChart, onAddFlavorNotes, onShare }: RoastHistoryListProps) => { // 型を追加
+const RoastHistoryList = ({ profiles, onEdit, onDelete, onViewChart, onAddFlavorNotes, onShare, onToggleFavorite }: RoastHistoryListProps) => { // 型を追加
   // 日付を整形するヘルパー関数
   const formatDate = (date: Date) => { // 型を追加
     return new Date(date).toLocaleDateString('ja-JP', {
@@ -440,6 +441,17 @@ const RoastHistoryList = ({ profiles, onEdit, onDelete, onViewChart, onAddFlavor
               <div className="flex justify-between items-start mb-2">
                 <h4 className="font-semibold text-lg">{profile.name}</h4>
                 <div className="flex gap-2">
+                  {/* ★お気に入りボタンを追加 (例: 407行目から) */}
+        <Button
+          size="sm"
+          variant="secondary"
+          // onClick で onToggleFavorite を呼び出す
+          onClick={() => onToggleFavorite(profile.id, profile.isFavorite || false)}
+          // isFavorite の状態に応じてボタンのスタイルと星アイコンの色を変える
+          className={profile.isFavorite ? 'text-amber-500' : 'text-gray-400'}
+        >
+          <Star size={16} fill={profile.isFavorite ? 'currentColor' : 'none'} /> {/* お気に入りなら塗りつぶす */}
+        </Button>
                   {/* ★味の感想ボタンを追加 */}
                   <Button size="sm" variant="secondary" onClick={() => onAddFlavorNotes(profile)}>
                     <MessageSquare size={16} />
@@ -607,6 +619,31 @@ const CoffeeRoastingApp = () => {
 
   const handleCloseShareModal = () => {
     setShareProfileId(null);
+  };
+  const handleToggleFavorite = async (profileId: string, currentFavoriteStatus: boolean) => {
+    if (!user) {
+      alert('ログインしてお気に入り機能を有効にしてください。');
+      return;
+    }
+
+    try {
+      const profileRef = doc(db, 'users', user.uid, 'roastProfiles', profileId);
+      await updateDoc(profileRef, {
+        isFavorite: !currentFavoriteStatus, // 現在の状態を反転
+      });
+      
+      // Firestoreの更新後、ローカルのprofiles状態を更新してUIに反映
+      updateProfile(profileId, { isFavorite: !currentFavoriteStatus }); // この行がローカルのprofilesステートを更新します
+      
+      alert(
+        !currentFavoriteStatus
+          ? 'お気に入りに追加しました！'
+          : 'お気に入りから削除しました。'
+      );
+    } catch (error) {
+      console.error('お気に入り状態の更新に失敗しました:', error);
+      alert('お気に入り状態の更新に失敗しました。');
+    }
   };
 
   useEffect(() => {
@@ -923,6 +960,7 @@ const handleSignOut = async () => {
             onViewChart={handleViewChart}
             onAddFlavorNotes={handleAddFlavorNotes} // ★新しいpropを渡す
             onShare={handleShareProfile}
+            onToggleFavorite={handleToggleFavorite}
           />
         )}
 
