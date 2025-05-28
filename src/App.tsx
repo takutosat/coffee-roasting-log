@@ -5,71 +5,142 @@ import { v4 as uuidv4 } from 'uuid'; // ID 生成のために
 import { auth, db } from './firebase';
 import { signInWithPopup, GoogleAuthProvider, signOut, onAuthStateChanged } from 'firebase/auth';
 import type { User } from 'firebase/auth';
-import { collection, addDoc, getDocs } from 'firebase/firestore';
+import { collection, addDoc, getDocs, updateDoc, deleteDoc, doc, query, where } from 'firebase/firestore';
+import type { TemperaturePoint, RoastProfile, RoastProfileFormData } from './types/RoastProfile';
 
-// 型定義
-// 温度記録の各ポイントの型定義
-interface TemperaturePoint {
-  time: number; // 焙煎開始からの時間（秒）
-  temperature: number; // その時点での温度（°C）
-  timestamp: Date; // 温度が記録された正確な日時
-}
+// ★状態管理のためのカスタムフックをFirestore対応に更新
+// ログインユーザーの情報を引数として受け取るように変更
+const useRoastStore = (user: User | null) => {
+  const [profiles, setProfiles] = useState<RoastProfile[]>([]); // 初期値は空の配列に
 
-// 焙煎プロファイルの型定義
-interface RoastProfile {
-  id: string; // プロファイルの一意なID
-  name: string; // プロファイル名（例: エチオピア イルガチェフェ）
-  bean: string; // 豆の種類（例: エチオピア産 アラビカ種）
-  roastLevel: string; // 焙煎度（例: ミディアム、ダーク）
-  startTime: Date; // 焙煎開始日時
-  endTime?: Date; // 焙煎終了日時（オプション）
-  duration: number; // 焙煎時間（秒）
-  temperatureLog: TemperaturePoint[]; // 温度ログの配列
-  notes: string; // 自由記述メモ
-  flavorNotes?: string; // ★焙煎後の味の感想を追加
-  weight: { // 焙煎前後の重量
-    green: number; // 生豆重量 (g)
-    roasted: number; // 焙煎後重量 (g)
+  // FirestoreのDate型（Timestamp）をJavaScriptのDate型に変換するヘルパー
+  const convertFirestoreTimestampToDate = (data: any): RoastProfile => {
+    // Firestoreから取得したデータはタイムスタンプがオブジェクトになっている可能性があるため変換
+    const convertedLog = data.temperatureLog.map((point: any) => ({
+      ...point,
+      timestamp: point.timestamp?.toDate ? point.timestamp.toDate() : new Date(point.timestamp) // TimestampをDateに変換
+    }));
+
+    return {
+      ...data,
+      startTime: data.startTime?.toDate ? data.startTime.toDate() : new Date(data.startTime),
+      endTime: data.endTime?.toDate ? data.endTime.toDate() : data.endTime, // endTimeはオプションなので存在する場合のみ変換
+      temperatureLog: convertedLog,
+    } as RoastProfile; // 型アサーション
   };
-}
 
-// 状態管理のためのカスタムフック
-// LocalStorageを使用して焙煎プロファイルを永続化します
-const useRoastStore = () => {
-  // LocalStorageからデータを読み込み、なければ空の配列を初期値とする
-  const [profiles, setProfiles] = useState<RoastProfile[]>(() => {
-    try {
-      const saved = localStorage.getItem('coffee-roast-profiles');
-      return saved ? JSON.parse(saved) : [];
-    } catch (error) {
-      console.error("Failed to parse profiles from localStorage:", error);
-      return []; // パースエラー時は空の配列を返す
+  // Firestoreへのデータ保存時にDateをTimestampに変換するヘルパー
+  const convertDatesToTimestamps = (profile: RoastProfile) => {
+    const newTemperatureLog = profile.temperatureLog.map(point => ({
+      ...point,
+      timestamp: new Date(point.timestamp) // DateオブジェクトをFirebaseが認識できる形式に
+    }));
+
+    return {
+      ...profile,
+      startTime: new Date(profile.startTime),
+      endTime: profile.endTime ? new Date(profile.endTime) : undefined,
+      temperatureLog: newTemperatureLog
+    };
+  };
+
+  // ユーザーがログインしている場合にFirestoreからデータをロードするuseEffect
+  useEffect(() => {
+    const fetchProfiles = async () => {
+      if (user) {
+        try {
+          // 'users' コレクションの下にユーザーIDごとのサブコレクション 'roastProfiles' を作成
+          const q = query(collection(db, 'users', user.uid, 'roastProfiles'));
+          const querySnapshot = await getDocs(q);
+          const fetchedProfiles: RoastProfile[] = [];
+          querySnapshot.forEach((doc) => {
+            // Firestoreから取得したデータにはidが含まれていないため、doc.id を追加
+            fetchedProfiles.push(convertFirestoreTimestampToDate({ ...doc.data(), id: doc.id }));
+          });
+          // 取得したプロファイルを startTime でソート (新しいものが上に来るように)
+          setProfiles(fetchedProfiles.sort((a, b) => b.startTime.getTime() - a.startTime.getTime()));
+        } catch (error) {
+          console.error("Firestoreからプロファイルの取得中にエラーが発生しました: ", error);
+        }
+      } else {
+        // ユーザーがログアウトしたらプロファイルをクリア
+        setProfiles([]);
+      }
+    };
+
+    fetchProfiles();
+  }, [user]); // user オブジェクトが変更されたときにデータを再取得
+
+  // 新しいプロファイルをFirestoreに追加する関数
+  const addProfile = async (profile: RoastProfile) => {
+    if (!user) {
+      alert("ログインしていません。プロファイルを保存できません。");
+      return;
     }
-  });
-
-  // 新しいプロファイルを追加する関数
-  const addProfile = (profile: RoastProfile) => {
-    const newProfiles = [...profiles, profile];
-    setProfiles(newProfiles);
-    localStorage.setItem('coffee-roast-profiles', JSON.stringify(newProfiles));
+    try {
+      const profileToSave = convertDatesToTimestamps(profile);
+      // Firestoreに新しいドキュメントを追加し、自動生成されたIDを取得
+      const docRef = await addDoc(collection(db, 'users', user.uid, 'roastProfiles'), profileToSave);
+      // Firestoreから返されたIDを使って、ローカルの状態も更新
+      setProfiles(prev => [{ ...profile, id: docRef.id }, ...prev].sort((a, b) => b.startTime.getTime() - a.startTime.getTime()));
+    } catch (error) {
+      console.error("Firestoreへのプロファイル追加中にエラーが発生しました: ", error);
+      alert("プロファイルの保存に失敗しました。");
+    }
   };
 
-  // 既存のプロファイルを更新する関数
-  const updateProfile = (id: string, updates: Partial<RoastProfile>) => {
-    const newProfiles = profiles.map(p => p.id === id ? { ...p, ...updates } : p);
-    setProfiles(newProfiles);
-    localStorage.setItem('coffee-roast-profiles', JSON.stringify(newProfiles));
+  // 既存のプロファイルをFirestoreで更新する関数
+  const updateProfile = async (id: string, updates: Partial<RoastProfile>) => {
+    if (!user) {
+      alert("ログインしていません。プロファイルを更新できません。");
+      return;
+    }
+    try {
+      // 更新対象のフィールドに含まれるDateをTimestampに変換
+      const updatesToSave = Object.fromEntries(
+        Object.entries(updates).map(([key, value]) => {
+          if (value instanceof Date) {
+            return [key, new Date(value)]; // DateオブジェクトをFirebaseが認識できる形式に
+          }
+          if (key === 'weight' && typeof value === 'object' && value !== null) {
+            // weightオブジェクトのネストされたプロパティも適切に処理
+            return [key, { ...value }];
+          }
+          if (key === 'temperatureLog' && Array.isArray(value)) {
+            return [key, value.map(point => ({ ...point, timestamp: new Date(point.timestamp) }))];
+          }
+          return [key, value];
+        })
+      );
+
+      await updateDoc(doc(db, 'users', user.uid, 'roastProfiles', id), updatesToSave);
+      setProfiles(prev => prev.map(p => p.id === id ? { ...p, ...updates } : p).sort((a, b) => b.startTime.getTime() - a.startTime.getTime()));
+    } catch (error) {
+      console.error("Firestoreでのプロファイル更新中にエラーが発生しました: ", error);
+      alert("プロファイルの更新に失敗しました。");
+    }
   };
 
-  // プロファイルを削除する関数
-  const deleteProfile = (id: string) => {
-    const newProfiles = profiles.filter(p => p.id !== id);
-    setProfiles(newProfiles);
-    localStorage.setItem('coffee-roast-profiles', JSON.stringify(newProfiles));
+  // プロファイルをFirestoreから削除する関数
+  const deleteProfile = async (id: string) => {
+    if (!user) {
+      alert("ログインしていません。プロファイルを削除できません。");
+      return;
+    }
+    if (window.confirm("本当にこのプロファイルを削除しますか？")) {
+      try {
+        await deleteDoc(doc(db, 'users', user.uid, 'roastProfiles', id));
+        setProfiles(prev => prev.filter(p => p.id !== id).sort((a, b) => b.startTime.getTime() - a.startTime.getTime()));
+      } catch (error) {
+        console.error("Firestoreからのプロファイル削除中にエラーが発生しました: ", error);
+        alert("プロファイルの削除に失敗しました。");
+      }
+    }
   };
 
   return { profiles, addProfile, updateProfile, deleteProfile };
 };
+
 
 // ストップウォッチ機能のためのカスタムフック
 const useStopwatch = () => {
@@ -250,16 +321,6 @@ const TemperatureChart = ({ temperatureLog }) => {
     </Card>
   );
 };
-
-// RoastProfileFormから渡されるデータの型定義
-interface RoastProfileFormData {
-  name: string;
-  bean: string;
-  roastLevel: string;
-  greenWeight: number;
-  roastedWeight: number;
-  notes: string;
-}
 
 // Props for RoastProfileForm
 interface RoastProfileFormProps {
@@ -550,67 +611,10 @@ const FlavorNotesModal = ({ profile, onSave, onClose }: FlavorNotesModalProps) =
 
 
 // メインアプリケーションコンポーネント
-const FirebaseTest = () => {
-  const [testData, setTestData] = useState<string[]>([]);
-  const [input, setInput] = useState('');
-
-  useEffect(() => {
-    const fetchData = async () => {
-      try {
-        const querySnapshot = await getDocs(collection(db, "test_collection"));
-        const data: string[] = [];
-        querySnapshot.forEach((doc) => {
-          data.push(doc.data().message);
-        });
-        setTestData(data);
-      } catch (e) {
-        console.error("Error fetching documents: ", e);
-      }
-    };
-    fetchData();
-  }, []);
-
-  const addMessage = async () => {
-    if (input.trim() === '') return;
-    try {
-      const docRef = await addDoc(collection(db, "test_collection"), {
-        message: input,
-        timestamp: new Date()
-      });
-      console.log("Document written with ID: ", docRef.id);
-      setTestData(prev => [...prev, input]);
-      setInput('');
-    } catch (e) {
-      console.error("Error adding document: ", e);
-    }
-  };
-
-  return (
-    <Card title="Firebase テスト (一時的)">
-      <div className="flex flex-col gap-4">
-        <Input
-          value={input}
-          onChange={(e) => setInput(e.target.value)}
-          placeholder="ここにメッセージを入力"
-        />
-        <Button onClick={addMessage}>Firestoreに保存</Button>
-        <h4 className="font-semibold mt-4">Firestoreのメッセージ:</h4>
-        {testData.length > 0 ? (
-          <ul className="list-disc list-inside">
-            {testData.map((msg, index) => (
-              <li key={index}>{msg}</li>
-            ))}
-          </ul>
-        ) : (
-          <p className="text-gray-500">まだメッセージがありません。</p>
-        )}
-      </div>
-    </Card>
-  );
-};
 const CoffeeRoastingApp = () => {
+  const [user, setUser] = useState<User | null>(null);
   // 焙煎プロファイルのストアから状態と関数を取得
-  const { profiles, addProfile, updateProfile, deleteProfile } = useRoastStore();
+  const { profiles, addProfile, updateProfile, deleteProfile } = useRoastStore(user);
   // ストップウォッチフックから状態と関数を取得
   const { time, isRunning, start, pause, reset, formatTime } = useStopwatch();
   
@@ -621,7 +625,6 @@ const CoffeeRoastingApp = () => {
   // アクティブなタブ（'roast', 'history', 'profile'）
   const [activeTab, setActiveTab] = useState('roast');
 
-  const [user, setUser] = useState<User | null>(null);
   useEffect(() => {
     // Firebase Authenticationの認証状態の変更を監視
     // onAuthStateChanged は、認証状態が変わるたびに呼び出されるリスナーを設定します。
@@ -851,7 +854,6 @@ const handleSignOut = async () => {
 
       {/* メインコンテンツ */}
       <main className="max-w-6xl mx-auto px-4 py-8">
-        <FirebaseTest />
         {activeTab === 'roast' && (
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
             <div>
