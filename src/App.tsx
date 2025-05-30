@@ -1,41 +1,39 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Timer, Play, Pause, Square, Plus, Download, Upload, Coffee, TrendingUp, Clock, Thermometer, X, MessageSquare,Star } from 'lucide-react'; // MessageSquareアイコンを追加
+import { Timer, Play, Pause, Square, Plus, Download, Upload, Coffee, TrendingUp, Clock, Thermometer, X, MessageSquare, Star } from 'lucide-react';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts';
-import { v4 as uuidv4 } from 'uuid'; // ID 生成のために
+import { v4 as uuidv4 } from 'uuid';
 import { auth, db } from './firebase';
 import { signInWithPopup, GoogleAuthProvider, signOut, onAuthStateChanged } from 'firebase/auth';
 import type { User } from 'firebase/auth';
-import { collection, addDoc, getDocs, updateDoc, deleteDoc, doc, query, where } from 'firebase/firestore';
+import { collection, addDoc, updateDoc, deleteDoc, doc, query, onSnapshot, orderBy } from 'firebase/firestore';
 import type { TemperaturePoint, RoastProfile, RoastProfileFormData } from './types/RoastProfile';
 import ShareProfileModal from './components/ShareProfileModal';
 import { Button } from './components/Button';
 
-// ★状態管理のためのカスタムフックをFirestore対応に更新
-// ログインユーザーの情報を引数として受け取るように変更
+// 状態管理のためのカスタムフックをFirestore対応に更新
 const useRoastStore = (user: User | null) => {
-  const [profiles, setProfiles] = useState<RoastProfile[]>([]); // 初期値は空の配列に
+  const [profiles, setProfiles] = useState<RoastProfile[]>([]);
 
   // FirestoreのDate型（Timestamp）をJavaScriptのDate型に変換するヘルパー
   const convertFirestoreTimestampToDate = (data: any): RoastProfile => {
-    // Firestoreから取得したデータはタイムスタンプがオブジェクトになっている可能性があるため変換
     const convertedLog = data.temperatureLog.map((point: any) => ({
       ...point,
-      timestamp: point.timestamp?.toDate ? point.timestamp.toDate() : new Date(point.timestamp) // TimestampをDateに変換
+      timestamp: point.timestamp?.toDate ? point.timestamp.toDate() : new Date(point.timestamp)
     }));
 
     return {
       ...data,
       startTime: data.startTime?.toDate ? data.startTime.toDate() : new Date(data.startTime),
-      endTime: data.endTime?.toDate ? data.endTime.toDate() : data.endTime, // endTimeはオプションなので存在する場合のみ変換
+      endTime: data.endTime?.toDate ? data.endTime.toDate() : data.endTime,
       temperatureLog: convertedLog,
-    } as RoastProfile; // 型アサーション
+    } as RoastProfile;
   };
 
   // Firestoreへのデータ保存時にDateをTimestampに変換するヘルパー
   const convertDatesToTimestamps = (profile: RoastProfile) => {
     const newTemperatureLog = profile.temperatureLog.map(point => ({
       ...point,
-      timestamp: new Date(point.timestamp) // DateオブジェクトをFirebaseが認識できる形式に
+      timestamp: new Date(point.timestamp)
     }));
 
     return {
@@ -46,32 +44,35 @@ const useRoastStore = (user: User | null) => {
     };
   };
 
-  // ユーザーがログインしている場合にFirestoreからデータをロードするuseEffect
+  // ユーザーがログインしている場合にFirestoreからデータをリアルタイムでロードするuseEffect
   useEffect(() => {
-    const fetchProfiles = async () => {
-      if (user) {
-        try {
-          // 'users' コレクションの下にユーザーIDごとのサブコレクション 'roastProfiles' を作成
-          const q = query(collection(db, 'users', user.uid, 'roastProfiles'));
-          const querySnapshot = await getDocs(q);
+    let unsubscribe: () => void;
+    if (user) {
+      try {
+        const q = query(collection(db, 'users', user.uid, 'roastProfiles'), orderBy('startTime', 'desc')); // startTimeで降順ソート
+        unsubscribe = onSnapshot(q, (querySnapshot) => {
           const fetchedProfiles: RoastProfile[] = [];
           querySnapshot.forEach((doc) => {
-            // Firestoreから取得したデータにはidが含まれていないため、doc.id を追加
             fetchedProfiles.push(convertFirestoreTimestampToDate({ ...doc.data(), id: doc.id }));
           });
-          // 取得したプロファイルを startTime でソート (新しいものが上に来るように)
-          setProfiles(fetchedProfiles.sort((a, b) => b.startTime.getTime() - a.startTime.getTime()));
-        } catch (error) {
-          console.error("Firestoreからプロファイルの取得中にエラーが発生しました: ", error);
-        }
-      } else {
-        // ユーザーがログアウトしたらプロファイルをクリア
-        setProfiles([]);
+          setProfiles(fetchedProfiles); // onSnapshotが常にソート済みデータを返す
+        }, (error) => {
+          console.error("Firestoreからのプロファイルリアルタイム取得中にエラーが発生しました: ", error);
+          alert("プロファイルの読み込み中にエラーが発生しました。");
+        });
+      } catch (error) {
+        console.error("Firestoreリスナーの設定中にエラーが発生しました: ", error);
+      }
+    } else {
+      setProfiles([]); // ユーザーがログアウトしたらプロファイルをクリア
+    }
+
+    return () => {
+      if (unsubscribe) {
+        unsubscribe(); // コンポーネントのアンマウント時にリスナーを解除
       }
     };
-
-    fetchProfiles();
-  }, [user]); // user オブジェクトが変更されたときにデータを再取得
+  }, [user]);
 
   // 新しいプロファイルをFirestoreに追加する関数
   const addProfile = async (profile: RoastProfile) => {
@@ -82,9 +83,8 @@ const useRoastStore = (user: User | null) => {
     try {
       const profileToSave = convertDatesToTimestamps(profile);
       // Firestoreに新しいドキュメントを追加し、自動生成されたIDを取得
-      const docRef = await addDoc(collection(db, 'users', user.uid, 'roastProfiles'), profileToSave);
-      // Firestoreから返されたIDを使って、ローカルの状態も更新
-      setProfiles(prev => [{ ...profile, id: docRef.id }, ...prev].sort((a, b) => b.startTime.getTime() - a.startTime.getTime()));
+      await addDoc(collection(db, 'users', user.uid, 'roastProfiles'), profileToSave);
+      // onSnapshotが自動的にローカルの状態を更新するので、ここではsetProfilesを直接呼ばない
     } catch (error) {
       console.error("Firestoreへのプロファイル追加中にエラーが発生しました: ", error);
       alert("プロファイルの保存に失敗しました。");
@@ -98,14 +98,12 @@ const useRoastStore = (user: User | null) => {
       return;
     }
     try {
-      // 更新対象のフィールドに含まれるDateをTimestampに変換
       const updatesToSave = Object.fromEntries(
         Object.entries(updates).map(([key, value]) => {
           if (value instanceof Date) {
-            return [key, new Date(value)]; // DateオブジェクトをFirebaseが認識できる形式に
+            return [key, new Date(value)];
           }
           if (key === 'weight' && typeof value === 'object' && value !== null) {
-            // weightオブジェクトのネストされたプロパティも適切に処理
             return [key, { ...value }];
           }
           if (key === 'temperatureLog' && Array.isArray(value)) {
@@ -116,7 +114,7 @@ const useRoastStore = (user: User | null) => {
       );
 
       await updateDoc(doc(db, 'users', user.uid, 'roastProfiles', id), updatesToSave);
-      setProfiles(prev => prev.map(p => p.id === id ? { ...p, ...updates } : p).sort((a, b) => b.startTime.getTime() - a.startTime.getTime()));
+      // onSnapshotが自動的にローカルの状態を更新するので、ここではsetProfilesを直接呼ばない
     } catch (error) {
       console.error("Firestoreでのプロファイル更新中にエラーが発生しました: ", error);
       alert("プロファイルの更新に失敗しました。");
@@ -132,7 +130,7 @@ const useRoastStore = (user: User | null) => {
     if (window.confirm("本当にこのプロファイルを削除しますか？")) {
       try {
         await deleteDoc(doc(db, 'users', user.uid, 'roastProfiles', id));
-        setProfiles(prev => prev.filter(p => p.id !== id).sort((a, b) => b.startTime.getTime() - a.startTime.getTime()));
+        // onSnapshotが自動的にローカルの状態を更新するので、ここではsetProfilesを直接呼ばない
       } catch (error) {
         console.error("Firestoreからのプロファイル削除中にエラーが発生しました: ", error);
         alert("プロファイルの削除に失敗しました。");
@@ -143,46 +141,36 @@ const useRoastStore = (user: User | null) => {
   return { profiles, addProfile, updateProfile, deleteProfile };
 };
 
-
 // ストップウォッチ機能のためのカスタムフック
 const useStopwatch = () => {
-  const [time, setTime] = useState(0); // 現在の経過時間（秒）
-  const [isRunning, setIsRunning] = useState(false); // タイマーが実行中かどうかのフラグ
-  const intervalRef = useRef<NodeJS.Timeout | null>(null); // setIntervalのIDを保持するためのref
+  const [time, setTime] = useState(0);
+  const [isRunning, setIsRunning] = useState(false);
+  const intervalRef = useRef<NodeJS.Timeout | null>(null);
 
-  // isRunningの状態に応じてタイマーを開始・停止するuseEffect
   useEffect(() => {
     if (isRunning) {
-      // 1秒ごとにtimeを更新
       intervalRef.current = setInterval(() => {
         setTime(prev => prev + 1);
       }, 1000);
     } else {
-      // isRunningがfalseになったらタイマーをクリア
       if (intervalRef.current) {
         clearInterval(intervalRef.current);
       }
     }
-
-    // コンポーネントのアンマウント時にタイマーをクリアするためのクリーンアップ関数
     return () => {
       if (intervalRef.current) {
         clearInterval(intervalRef.current);
       }
     };
-  }, [isRunning]); // isRunningが変更されたときにのみ実行
+  }, [isRunning]);
 
-  // タイマーを開始
   const start = () => setIsRunning(true);
-  // タイマーを一時停止
   const pause = () => setIsRunning(false);
-  // タイマーをリセット
   const reset = () => {
     setTime(0);
     setIsRunning(false);
   };
 
-  // 秒数をMM:SS形式にフォーマット
   const formatTime = (seconds: number) => {
     const mins = Math.floor(seconds / 60);
     const secs = seconds % 60;
@@ -193,7 +181,7 @@ const useStopwatch = () => {
 };
 
 // 再利用可能な入力フィールドコンポーネント
-const Input = ({ label, type = 'text', value, onChange, placeholder, ...props }) => (
+const Input = ({ label, type = 'text', value, onChange, placeholder, ...props }: any) => (
   <div className="mb-4">
     {label && <label className="block text-sm font-medium text-gray-700 mb-1">{label}</label>}
     <input
@@ -208,7 +196,7 @@ const Input = ({ label, type = 'text', value, onChange, placeholder, ...props })
 );
 
 // 再利用可能なカードコンポーネント
-const Card = ({ children, title, className = '' }) => (
+const Card = ({ children, title, className = '' }: any) => (
   <div className={`bg-white rounded-lg shadow-md p-6 ${className}`}>
     {title && <h3 className="text-lg font-semibold mb-4 text-gray-800">{title}</h3>}
     {children}
@@ -216,19 +204,17 @@ const Card = ({ children, title, className = '' }) => (
 );
 
 // 温度記録コンポーネント
-const TemperatureLogger = ({ onTemperatureAdd, currentTime }) => {
-  const [temperature, setTemperature] = useState(''); // 入力された温度
+const TemperatureLogger = ({ onTemperatureAdd, currentTime }: any) => {
+  const [temperature, setTemperature] = useState('');
 
-  // 温度記録ボタンがクリックされたときのハンドラ
   const handleAdd = () => {
-    // 温度が入力されており、数値であることを確認
     if (temperature && !isNaN(Number(temperature))) {
       onTemperatureAdd({
-        time: currentTime, // 現在のタイマー時間
-        temperature: Number(temperature), // 入力された温度
-        timestamp: new Date() // 現在のタイムスタンプ
+        time: currentTime,
+        temperature: Number(temperature),
+        timestamp: new Date()
       });
-      setTemperature(''); // 入力フィールドをクリア
+      setTemperature('');
     }
   };
 
@@ -238,7 +224,7 @@ const TemperatureLogger = ({ onTemperatureAdd, currentTime }) => {
         <Input
           type="number"
           value={temperature}
-          onChange={(e) => setTemperature(e.target.value)}
+          onChange={(e: React.ChangeEvent<HTMLInputElement>) => setTemperature(e.target.value)}
           placeholder="温度 (°C)"
         />
         <Button onClick={handleAdd} disabled={!temperature}>
@@ -251,9 +237,8 @@ const TemperatureLogger = ({ onTemperatureAdd, currentTime }) => {
 };
 
 // 温度チャートコンポーネント
-const TemperatureChart = ({ temperatureLog }) => {
-  // 時間をMM:SS形式にフォーマットするヘルパー関数
-  const formatTime = (seconds: number) => { // 型を追加
+const TemperatureChart = ({ temperatureLog }: any) => {
+  const formatTime = (seconds: number) => {
     const mins = Math.floor(seconds / 60);
     const secs = seconds % 60;
     return `${mins}:${secs.toString().padStart(2, '0')}`;
@@ -261,30 +246,30 @@ const TemperatureChart = ({ temperatureLog }) => {
 
   return (
     <Card title="温度カーブ" className="mb-6">
-      <div className="h-80"> {/* チャートの高さ */}
+      <div className="h-80">
         <ResponsiveContainer width="100%" height="100%">
           <LineChart data={temperatureLog}>
-            <CartesianGrid strokeDasharray="3 3" /> {/* グリッド線 */}
-            <XAxis 
-              dataKey="time" // X軸のデータキーは時間
-              tickFormatter={formatTime} // 目盛りをMM:SS形式にフォーマット
-              label={{ value: '時間', position: 'insideBottom', offset: -5 }} // X軸ラベル
+            <CartesianGrid strokeDasharray="3 3" />
+            <XAxis
+              dataKey="time"
+              tickFormatter={formatTime}
+              label={{ value: '時間', position: 'insideBottom', offset: -5 }}
             />
-            <YAxis 
-              label={{ value: '温度 (°C)', angle: -90, position: 'insideLeft' }} // Y軸ラベル
+            <YAxis
+              label={{ value: '温度 (°C)', angle: -90, position: 'insideLeft' }}
             />
-            <Tooltip 
-              labelFormatter={(value: number) => `時間: ${formatTime(value)}`} // 型を追加
-              formatter={(value: number) => [`${value}°C`, '温度']} // 型を追加
+            <Tooltip
+              labelFormatter={(value: number) => `時間: ${formatTime(value)}`}
+              formatter={(value: number) => [`${value}°C`, '温度']}
             />
-            <Legend /> {/* 凡例 */}
-            <Line 
-              type="monotone" // スムーズなカーブ
-              dataKey="temperature" // Y軸のデータキーは温度
-              stroke="#f59e0b" // 線の色（アンバー）
-              strokeWidth={2} // 線の太さ
-              dot={{ fill: '#f59e0b', strokeWidth: 2, r: 4 }} // ドットのスタイル
-              name="温度" // 凡例に表示される名前
+            <Legend />
+            <Line
+              type="monotone"
+              dataKey="temperature"
+              stroke="#f59e0b"
+              strokeWidth={2}
+              dot={{ fill: '#f59e0b', strokeWidth: 2, r: 4 }}
+              name="温度"
             />
           </LineChart>
         </ResponsiveContainer>
@@ -302,28 +287,24 @@ interface RoastProfileFormProps {
 
 // 焙煎プロファイル作成・編集フォーム
 const RoastProfileForm = ({ onSave, onCancel, currentProfile = null }: RoastProfileFormProps) => {
-  // フォームの入力値を管理するstate
   const [formData, setFormData] = useState({
     name: currentProfile?.name || '',
     bean: currentProfile?.bean || '',
     roastLevel: currentProfile?.roastLevel || 'ミディアム',
-    greenWeight: currentProfile?.weight?.green || '', // string | number
-    roastedWeight: currentProfile?.weight?.roasted || '', // string | number
+    greenWeight: currentProfile?.weight?.green || '',
+    roastedWeight: currentProfile?.weight?.roasted || '',
     notes: currentProfile?.notes || ''
   });
 
-  // 焙煎度の選択肢
   const roastLevels = ['ライト', 'ミディアム', 'ミディアムダーク', 'ダーク', 'フレンチ'];
 
-  // フォーム送信時のハンドラ
-  const handleSubmit = (e: React.FormEvent) => { // 型を追加
-    e.preventDefault(); // デフォルトのフォーム送信を防ぐ
-    // 親コンポーネントにデータを渡す
+  const handleSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
     onSave({
       ...formData,
-      greenWeight: Number(formData.greenWeight), // 数値に変換
-      roastedWeight: Number(formData.roastedWeight) // 数値に変換
-    }, !!currentProfile); // 編集モードかどうかを伝えるフラグ
+      greenWeight: Number(formData.greenWeight),
+      roastedWeight: Number(formData.roastedWeight)
+    }, !!currentProfile);
   };
 
   return (
@@ -332,24 +313,24 @@ const RoastProfileForm = ({ onSave, onCancel, currentProfile = null }: RoastProf
         <Input
           label="プロファイル名"
           value={formData.name}
-          onChange={(e: React.ChangeEvent<HTMLInputElement>) => setFormData({...formData, name: e.target.value})} // 型を追加
+          onChange={(e: React.ChangeEvent<HTMLInputElement>) => setFormData({...formData, name: e.target.value})}
           placeholder="例: エチオピア イルガチェフェ"
-          required // 必須入力
+          required
         />
         
         <Input
           label="豆の種類"
           value={formData.bean}
-          onChange={(e: React.ChangeEvent<HTMLInputElement>) => setFormData({...formData, bean: e.target.value})} // 型を追加
+          onChange={(e: React.ChangeEvent<HTMLInputElement>) => setFormData({...formData, bean: e.target.value})}
           placeholder="例: エチオピア産 アラビカ種"
-          required // 必須入力
+          required
         />
         
         <div className="mb-4">
           <label className="block text-sm font-medium text-gray-700 mb-1">焙煎度</label>
           <select
             value={formData.roastLevel}
-            onChange={(e: React.ChangeEvent<HTMLSelectElement>) => setFormData({...formData, roastLevel: e.target.value})} // 型を追加
+            onChange={(e: React.ChangeEvent<HTMLSelectElement>) => setFormData({...formData, roastLevel: e.target.value})}
             className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-amber-500"
           >
             {roastLevels.map(level => (
@@ -363,7 +344,7 @@ const RoastProfileForm = ({ onSave, onCancel, currentProfile = null }: RoastProf
             label="生豆重量 (g)"
             type="number"
             value={formData.greenWeight}
-            onChange={(e: React.ChangeEvent<HTMLInputElement>) => setFormData({...formData, greenWeight: e.target.value})} // 型を追加
+            onChange={(e: React.ChangeEvent<HTMLInputElement>) => setFormData({...formData, greenWeight: e.target.value})}
             placeholder="100"
           />
           
@@ -371,7 +352,7 @@ const RoastProfileForm = ({ onSave, onCancel, currentProfile = null }: RoastProf
             label="焙煎後重量 (g)"
             type="number"
             value={formData.roastedWeight}
-            onChange={(e: React.ChangeEvent<HTMLInputElement>) => setFormData({...formData, roastedWeight: e.target.value})} // 型を追加
+            onChange={(e: React.ChangeEvent<HTMLInputElement>) => setFormData({...formData, roastedWeight: e.target.value})}
             placeholder="85"
           />
         </div>
@@ -380,7 +361,7 @@ const RoastProfileForm = ({ onSave, onCancel, currentProfile = null }: RoastProf
           <label className="block text-sm font-medium text-gray-700 mb-1">メモ</label>
           <textarea
             value={formData.notes}
-            onChange={(e: React.ChangeEvent<HTMLTextAreaElement>) => setFormData({...formData, notes: e.target.value})} // 型を追加
+            onChange={(e: React.ChangeEvent<HTMLTextAreaElement>) => setFormData({...formData, notes: e.target.value})}
             placeholder="焙煎の特記事項、風味の特徴など..."
             className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-amber-500 h-24 resize-none"
           />
@@ -404,16 +385,16 @@ interface RoastHistoryListProps {
   profiles: RoastProfile[];
   onEdit: (profile: RoastProfile) => void;
   onDelete: (id: string) => void;
-  onViewChart: (profile: RoastProfile) => void; // チャート表示用
-  onAddFlavorNotes: (profile: RoastProfile) => void; // ★味の感想追加用
+  onViewChart: (profile: RoastProfile) => void;
+  onAddFlavorNotes: (profile: RoastProfile) => void;
   onShare: (profileId: string) => void;
   onToggleFavorite: (profileId: string, currentFavoriteStatus: boolean) => Promise<void>;
+  activeTab: string;
 }
 
 // 焙煎履歴一覧コンポーネント
-const RoastHistoryList = ({ profiles, onEdit, onDelete, onViewChart, onAddFlavorNotes, onShare, onToggleFavorite }: RoastHistoryListProps) => { // 型を追加
-  // 日付を整形するヘルパー関数
-  const formatDate = (date: Date) => { // 型を追加
+const RoastHistoryList = ({ profiles, onEdit, onDelete, onViewChart, onAddFlavorNotes, onShare, onToggleFavorite, activeTab }: RoastHistoryListProps) => {
+  const formatDate = (date: Date) => {
     return new Date(date).toLocaleDateString('ja-JP', {
       year: 'numeric',
       month: 'short',
@@ -423,41 +404,43 @@ const RoastHistoryList = ({ profiles, onEdit, onDelete, onViewChart, onAddFlavor
     });
   };
 
-  // 時間を整形するヘルパー関数
-  const formatDuration = (seconds: number) => { // 型を追加
+  const formatDuration = (seconds: number) => {
     const mins = Math.floor(seconds / 60);
     const secs = seconds % 60;
     return `${mins}分${secs}秒`;
   };
 
+  // 表示するプロファイルをフィルタリング
+  const displayedProfiles = activeTab === 'favorites'
+    ? profiles.filter(profile => profile.isFavorite)
+    : profiles;
+
   return (
-    <Card title="焙煎履歴">
-      {profiles.length === 0 ? (
-        <p className="text-gray-500 text-center py-8">まだ焙煎記録がありません</p>
+    <Card title={activeTab === 'favorites' ? "お気に入り" : "焙煎履歴"}>
+      {displayedProfiles.length === 0 ? (
+        <p className="text-gray-500 text-center py-8">
+          {activeTab === 'favorites' ? "まだお気に入り登録された焙煎記録がありません。" : "まだ焙煎記録がありません。"}
+        </p>
       ) : (
         <div className="space-y-4">
-          {profiles.map(profile => (
+          {displayedProfiles.map(profile => (
             <div key={profile.id} className="border border-gray-200 rounded-lg p-4">
               <div className="flex justify-between items-start mb-2">
                 <h4 className="font-semibold text-lg">{profile.name}</h4>
                 <div className="flex gap-2">
-                  {/* ★お気に入りボタンを追加 (例: 407行目から) */}
-        <Button
-          size="sm"
-          variant="secondary"
-          // onClick で onToggleFavorite を呼び出す
-          onClick={() => onToggleFavorite(profile.id, profile.isFavorite || false)}
-          // isFavorite の状態に応じてボタンのスタイルと星アイコンの色を変える
-          className={profile.isFavorite ? 'text-amber-500' : 'text-gray-400'}
-        >
-          <Star size={16} fill={profile.isFavorite ? 'currentColor' : 'none'} /> {/* お気に入りなら塗りつぶす */}
-        </Button>
-                  {/* ★味の感想ボタンを追加 */}
+                  <Button
+                    size="sm"
+                    variant="secondary"
+                    onClick={() => onToggleFavorite(profile.id, profile.isFavorite || false)}
+                    className={profile.isFavorite ? 'text-amber-500' : 'text-gray-400'}
+                  >
+                    <Star size={16} fill={profile.isFavorite ? 'currentColor' : 'none'} />
+                  </Button>
                   <Button size="sm" variant="secondary" onClick={() => onAddFlavorNotes(profile)}>
                     <MessageSquare size={16} />
                     {profile.flavorNotes ? "感想を編集" : "感想を追加"}
                   </Button>
-                  <Button size="sm" variant="secondary" onClick={() => onViewChart(profile)} disabled={profile.temperatureLog.length === 0}> {/* チャート表示ボタン */}
+                  <Button size="sm" variant="secondary" onClick={() => onViewChart(profile)} disabled={profile.temperatureLog.length === 0}>
                     チャート表示
                   </Button>
                   <Button size="sm" variant="secondary" onClick={() => onShare(profile.id)}>
@@ -497,7 +480,6 @@ const RoastHistoryList = ({ profiles, onEdit, onDelete, onViewChart, onAddFlavor
                   <p className="mt-1">{profile.notes}</p>
                 </div>
               )}
-              {/* ★味の感想を表示 */}
               {profile.flavorNotes && (
                 <div className="mt-3 p-3 bg-blue-50 rounded">
                   <span className="text-blue-700 text-sm">味の感想:</span>
@@ -544,7 +526,7 @@ const ChartModal = ({ profile, onClose }: ChartModalProps) => {
   );
 };
 
-// ★味の感想入力用モーダルコンポーネント
+// 味の感想入力用モーダルコンポーネント
 interface FlavorNotesModalProps {
   profile: RoastProfile;
   onSave: (profileId: string, flavorNotes: string) => void;
@@ -596,20 +578,14 @@ const FlavorNotesModal = ({ profile, onSave, onClose }: FlavorNotesModalProps) =
   );
 };
 
-
 // メインアプリケーションコンポーネント
 const CoffeeRoastingApp = () => {
   const [user, setUser] = useState<User | null>(null);
-  // 焙煎プロファイルのストアから状態と関数を取得
   const { profiles, addProfile, updateProfile, deleteProfile } = useRoastStore(user);
-  // ストップウォッチフックから状態と関数を取得
   const { time, isRunning, start, pause, reset, formatTime } = useStopwatch();
   
-  // 現在アクティブな焙煎プロファイル
   const [currentProfile, setCurrentProfile] = useState<RoastProfile | null>(null);
-  // 現在の焙煎の温度ログ
   const [temperatureLog, setTemperatureLog] = useState<TemperaturePoint[]>([]);
-  // アクティブなタブ（'roast', 'history', 'profile'）
   const [activeTab, setActiveTab] = useState('roast');
   const [shareProfileId, setShareProfileId] = useState<string | null>(null);
 
@@ -620,6 +596,7 @@ const CoffeeRoastingApp = () => {
   const handleCloseShareModal = () => {
     setShareProfileId(null);
   };
+
   const handleToggleFavorite = async (profileId: string, currentFavoriteStatus: boolean) => {
     if (!user) {
       alert('ログインしてお気に入り機能を有効にしてください。');
@@ -629,12 +606,9 @@ const CoffeeRoastingApp = () => {
     try {
       const profileRef = doc(db, 'users', user.uid, 'roastProfiles', profileId);
       await updateDoc(profileRef, {
-        isFavorite: !currentFavoriteStatus, // 現在の状態を反転
+        isFavorite: !currentFavoriteStatus,
       });
-      
-      // Firestoreの更新後、ローカルのprofiles状態を更新してUIに反映
-      updateProfile(profileId, { isFavorite: !currentFavoriteStatus }); // この行がローカルのprofilesステートを更新します
-      
+      // onSnapshotが自動的にローカルの状態を更新するので、ここではupdateProfileを直接呼ばない
       alert(
         !currentFavoriteStatus
           ? 'お気に入りに追加しました！'
@@ -647,172 +621,139 @@ const CoffeeRoastingApp = () => {
   };
 
   useEffect(() => {
-    // Firebase Authenticationの認証状態の変更を監視
-    // onAuthStateChanged は、認証状態が変わるたびに呼び出されるリスナーを設定します。
-    // アプリの初期ロード時にも現在の認証状態が通知されます。
     const unsubscribe = onAuthStateChanged(auth, (currentUser) => {
-      setUser(currentUser); // ユーザーがログインしていれば currentUser が Userオブジェクト、ログアウトしていれば null
-      // ここで、ユーザーがログインしている場合にのみFirestoreからデータを読み込むロジックを後で追加します。
-      // (現在はFirebaseTestコンポーネントがテスト用としてFirestoreに直接アクセスしていますが、
-      // 実際にはログインしているユーザーのデータのみを読み込むように変更します)
+      setUser(currentUser);
     });
-
-    // コンポーネントがアンマウントされる（画面から消える）ときに、
-    // メモリリークを防ぐために監視を解除します。
     return () => unsubscribe();
-  }, []); // 依存配列が空なので、このuseEffectはコンポーネントがマウントされた時に一度だけ実行され、
-          // その後の再レンダーでは再実行されません。（認証状態の変更はonAuthStateChangedが監視するため）
-  // Googleでサインインする関数
-const handleGoogleSignIn = async () => {
-  const provider = new GoogleAuthProvider(); // Google認証プロバイダをインスタンス化
-  try {
-    await signInWithPopup(auth, provider); // ポップアップでサインイン
-    // ログイン成功時に特別な処理がなければ、ここで何もしなくてもOK
-    console.log("Googleサインイン成功！");
-  } catch (error) {
-    console.error("Googleサインインエラー: ", error);
-    alert("Googleサインイン中にエラーが発生しました。");
-  }
-};
+  }, []);
 
-// サインアウトする関数
-const handleSignOut = async () => {
-  try {
-    await signOut(auth); // サインアウト
-    console.log("サインアウト成功！");
-  } catch (error) {
-    console.error("サインアウトエラー: ", error);
-    alert("サインアウト中にエラーが発生しました。");
-  }
-};        
-  // プロファイル作成フォームの表示/非表示
+  const handleGoogleSignIn = async () => {
+    const provider = new GoogleAuthProvider();
+    try {
+      await signInWithPopup(auth, provider);
+      console.log("Googleサインイン成功！");
+    } catch (error) {
+      console.error("Googleサインインエラー: ", error);
+      alert("Googleサインイン中にエラーが発生しました。");
+    }
+  };
+
+  const handleSignOut = async () => {
+    try {
+      await signOut(auth);
+      console.log("サインアウト成功！");
+    } catch (error) {
+      console.error("サインアウトエラー: ", error);
+      alert("サインアウト中にエラーが発生しました。");
+    }
+  };        
+
   const [showProfileForm, setShowProfileForm] = useState(false);
-  // 編集中のプロファイルデータ
   const [editingProfile, setEditingProfile] = useState<RoastProfile | null>(null);
-  // チャート表示のために選択された履歴プロファイル
   const [selectedProfileForChart, setSelectedProfileForChart] = useState<RoastProfile | null>(null);
-  // ★味の感想入力のために選択された履歴プロファイル
   const [selectedProfileForFlavorNotes, setSelectedProfileForFlavorNotes] = useState<RoastProfile | null>(null);
 
-  // 焙煎開始ハンドラ
   const handleStartRoast = () => {
-    if (!isRunning && currentProfile) { // タイマーが停止中で、かつ現在のプロファイルが設定されている場合のみ開始
-      start(); // タイマーを開始
-      setTemperatureLog([]); // 温度ログをリセット
-      // 焙煎開始時間を現在のプロファイルに設定
+    if (!isRunning && currentProfile) {
+      start();
+      setTemperatureLog([]);
       setCurrentProfile(prevProfile => prevProfile ? { ...prevProfile, startTime: new Date() } : null);
     }
   };
 
-  // 焙煎一時停止ハンドラ
   const handlePauseRoast = () => {
-    pause(); // タイマーを一時停止
+    pause();
   };
 
-  // 焙煎停止・保存ハンドラ
   const handleStopRoast = () => {
-    // 現在のプロファイルがあり、温度ログが記録されている場合のみ保存
     if (currentProfile && temperatureLog.length > 0) {
-      // 新しい焙煎プロファイルオブジェクトを作成
       const finishedProfile: RoastProfile = {
-        ...currentProfile, // 既存のcurrentProfileのデータをスプレッド
-        endTime: new Date(), // 焙煎終了時間
-        duration: time, // 焙煎時間
-        temperatureLog: temperatureLog, // 温度ログ
-        // weightとnotesはcurrentProfileに既に正しく含まれている
+        ...currentProfile,
+        endTime: new Date(),
+        duration: time,
+        temperatureLog: temperatureLog,
       };
-      
-      addProfile(finishedProfile); // プロファイルをストアに追加
-      reset(); // タイマーをリセット
-      setTemperatureLog([]); // 温度ログをクリア
-      setCurrentProfile(null); // 現在のプロファイルをクリア
-      setActiveTab('history'); // 履歴タブに切り替え
+      addProfile(finishedProfile);
+      reset();
+      setTemperatureLog([]);
+      setCurrentProfile(null);
+      setActiveTab('history');
     }
   };
 
-  // 温度記録追加ハンドラ
   const handleTemperatureAdd = (tempPoint: TemperaturePoint) => {
-    setTemperatureLog(prev => [...prev, tempPoint]); // 温度ログに新しいポイントを追加
+    setTemperatureLog(prev => [...prev, tempPoint]);
   };
 
-  // プロファイル保存ハンドラ（新規作成・編集共通）
   const handleSaveProfile = (profileData: RoastProfileFormData, isEditing: boolean) => {
     if (isEditing && editingProfile) {
-      // 編集中のプロファイルがある場合、更新
       updateProfile(editingProfile.id, {
         name: profileData.name,
         bean: profileData.bean,
         roastLevel: profileData.roastLevel,
         notes: profileData.notes,
-        weight: { // weightオブジェクトを正しくネストして更新
+        weight: {
           green: profileData.greenWeight,
           roasted: profileData.roastedWeight
         }
       });
-      setEditingProfile(null); // 編集状態を終了
+      setEditingProfile(null);
     } else {
-      // 新規プロファイルの場合、完全なRoastProfileオブジェクトを作成して現在のプロファイルとして設定
       const newProfile: RoastProfile = {
-        id: uuidv4(), // 新しいIDを生成
+        id: uuidv4(),
         name: profileData.name,
         bean: profileData.bean,
         roastLevel: profileData.roastLevel,
-        startTime: new Date(), // 初期値として現在時刻を設定（焙煎開始時に更新される）
-        duration: 0, // 初期値
-        temperatureLog: [], // 初期値
+        startTime: new Date(),
+        duration: 0,
+        temperatureLog: [],
         notes: profileData.notes,
-        flavorNotes: '', // ★味の感想の初期値
-        weight: { // weightオブジェクトを正しくネスト
+        flavorNotes: '',
+        isFavorite: false, // 新規作成時の初期値を追加
+        weight: {
           green: profileData.greenWeight,
           roasted: profileData.roastedWeight
         }
       };
-      setCurrentProfile(newProfile); // 完全なRoastProfileオブジェクトをセット
+      setCurrentProfile(newProfile);
     }
-    setShowProfileForm(false); // フォームを非表示
+    setShowProfileForm(false);
   };
 
-  // プロファイル編集開始ハンドラ
   const handleEditProfile = (profile: RoastProfile) => {
-    setEditingProfile(profile); // 編集対象のプロファイルをセット
-    setShowProfileForm(true); // フォームを表示
+    setEditingProfile(profile);
+    setShowProfileForm(true);
   };
 
-  // 履歴からチャート表示を開始するハンドラ
   const handleViewChart = (profile: RoastProfile) => {
-    setSelectedProfileForChart(profile); // 選択されたプロファイルを状態にセット
+    setSelectedProfileForChart(profile);
   };
 
-  // チャートモーダルを閉じるハンドラ
   const handleCloseChartModal = () => {
-    setSelectedProfileForChart(null); // 状態をクリアしてモーダルを閉じる
+    setSelectedProfileForChart(null);
   };
 
-  // ★履歴から味の感想入力/編集を開始するハンドラ
   const handleAddFlavorNotes = (profile: RoastProfile) => {
-    setSelectedProfileForFlavorNotes(profile); // 選択されたプロファイルを状態にセット
+    setSelectedProfileForFlavorNotes(profile);
   };
 
-  // ★味の感想モーダルを閉じるハンドラ
   const handleCloseFlavorNotesModal = () => {
-    setSelectedProfileForFlavorNotes(null); // 状態をクリアしてモーダルを閉じる
+    setSelectedProfileForFlavorNotes(null);
   };
 
-  // ★味の感想を保存するハンドラ
   const handleSaveFlavorNotes = (profileId: string, flavorNotes: string) => {
     updateProfile(profileId, { flavorNotes: flavorNotes });
   };
 
-  // データエクスポート機能
   const exportData = () => {
-    const data = JSON.stringify(profiles, null, 2); // プロファイルをJSON形式で整形
-    const blob = new Blob([data], { type: 'application/json' }); // Blobオブジェクトを作成
-    const url = URL.createObjectURL(blob); // オブジェクトURLを生成
-    const a = document.createElement('a'); // <a>要素を作成
+    const data = JSON.stringify(profiles, null, 2);
+    const blob = new Blob([data], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
     a.href = url;
-    a.download = 'coffee-roast-profiles.json'; // ダウンロードファイル名
-    a.click(); // クリックイベントをシミュレートしてダウンロード
-    URL.revokeObjectURL(url); // オブジェクトURLを解放
+    a.download = 'coffee-roast-profiles.json';
+    a.click();
+    URL.revokeObjectURL(url);
   };
 
   return (
@@ -836,13 +777,12 @@ const handleSignOut = async () => {
                 Googleでログイン
               </Button>
             )}
-            <Button onClick={() => alert('エクスポート機能はまだ開発中です！')} variant="secondary" size="md">
+            <Button onClick={exportData} variant="secondary" size="md">
               エクスポート
             </Button>
           </div>
         </div>
       </header>
-
 
       {/* ナビゲーション */}
       <nav className="bg-white border-b">
@@ -851,6 +791,7 @@ const handleSignOut = async () => {
             {[
               { id: 'roast', label: '焙煎', icon: Timer },
               { id: 'history', label: '履歴', icon: TrendingUp },
+              { id: 'favorites', label: 'お気に入り', icon: Star },
               { id: 'profile', label: 'プロファイル', icon: Coffee }
             ].map(tab => {
               const Icon = tab.icon;
@@ -893,140 +834,172 @@ const handleSignOut = async () => {
                         size="lg"
                         disabled={!currentProfile} // プロファイルが選択されていないと開始できない
                       >
-                        <Play size={20} />
-                        開始
+                        <Play size={24} />
+                        焙煎開始
                       </Button>
                     ) : (
-                      <Button onClick={handlePauseRoast} variant="secondary" size="lg">
-                        <Pause size={20} />
-                        一時停止
-                      </Button>
+                      <>
+                        <Button onClick={handlePauseRoast} variant="secondary" size="lg">
+                          <Pause size={24} />
+                          一時停止
+                        </Button>
+                        <Button onClick={handleStopRoast} variant="danger" size="lg">
+                          <Square size={24} />
+                          停止・保存
+                        </Button>
+                      </>
                     )}
-                    
-                    <Button 
-                      onClick={handleStopRoast} 
-                      variant="danger" 
-                      size="lg"
-                      disabled={!isRunning || temperatureLog.length === 0} // 実行中で温度ログがないと停止・保存できない
-                    >
-                      <Square size={20} />
-                      停止・保存
-                    </Button>
                   </div>
-                  
                   {!currentProfile && (
-                    <p className="text-sm text-gray-500 mt-4">
-                      焙煎を開始するには、まずプロファイルを作成してください
+                    <p className="mt-4 text-sm text-red-500">
+                      焙煎を開始するには、まず「プロファイル」タブで新しいプロファイルを作成してください。
                     </p>
                   )}
                 </div>
               </Card>
 
-              {/* 現在のプロファイル表示 */}
-              {currentProfile && (
-                <Card title="現在のプロファイル" className="mb-6">
-                  <div className="space-y-2">
-                    <p><strong>名前:</strong> {currentProfile.name}</p>
-                    <p><strong>豆:</strong> {currentProfile.bean}</p>
-                    <p><strong>焙煎度:</strong> {currentProfile.roastLevel}</p>
-                    <p><strong>生豆重量:</strong> {currentProfile.weight.green}g</p>
+              {/* 現在のプロファイル情報 */}
+              <Card title="現在の焙煎プロファイル" className="mb-6">
+                {currentProfile ? (
+                  <div>
+                    <p className="text-lg font-semibold">{currentProfile.name}</p>
+                    <p className="text-sm text-gray-600 mb-2">{currentProfile.bean} - {currentProfile.roastLevel}</p>
+                    {currentProfile.weight && (currentProfile.weight.green || currentProfile.weight.roasted) && (
+                      <p className="text-sm text-gray-600">
+                        生豆: {currentProfile.weight.green || 'N/A'}g / 焙煎後: {currentProfile.weight.roasted || 'N/A'}g
+                      </p>
+                    )}
+                    {currentProfile.notes && (
+                      <p className="mt-2 text-sm text-gray-700 border-t pt-2 mt-2">メモ: {currentProfile.notes}</p>
+                    )}
                   </div>
-                </Card>
-              )}
+                ) : (
+                  <p className="text-gray-500">プロファイルが選択されていません。下のボタンから作成してください。</p>
+                )}
+                <div className="mt-4 flex gap-2">
+                  <Button onClick={() => { setShowProfileForm(true); setEditingProfile(null); }} variant="secondary">
+                    <Plus size={16} />
+                    新規プロファイル作成
+                  </Button>
+                  {currentProfile && (
+                    <Button onClick={() => handleEditProfile(currentProfile)} variant="secondary">
+                      <Coffee size={16} />
+                      プロファイルを編集
+                    </Button>
+                  )}
+                </div>
+              </Card>
 
               {/* 温度記録 */}
-              {isRunning && ( // タイマー実行中のみ表示
-                <TemperatureLogger 
-                  onTemperatureAdd={handleTemperatureAdd}
-                  currentTime={time}
-                />
-              )}
-            </div>
+              <TemperatureLogger onTemperatureAdd={handleTemperatureAdd} currentTime={time} />
 
+            </div>
+            
             <div>
-              {/* 温度チャート */}
-              {temperatureLog.length > 0 && ( // 温度ログがある場合のみ表示
-                <TemperatureChart temperatureLog={temperatureLog} />
-              )}
+              {/* 温度カーブチャート */}
+              <TemperatureChart temperatureLog={temperatureLog} />
+
+              {/* 温度ログ詳細 */}
+              <Card title="温度ログ詳細">
+                {temperatureLog.length === 0 ? (
+                  <p className="text-gray-500 text-center py-4">まだ温度ログがありません。</p>
+                ) : (
+                  <div className="h-64 overflow-y-auto border rounded-lg p-2">
+                    <table className="min-w-full text-sm text-left text-gray-500">
+                      <thead className="text-xs text-gray-700 uppercase bg-gray-50 sticky top-0">
+                        <tr>
+                          <th scope="col" className="py-2 px-4">時間</th>
+                          <th scope="col" className="py-2 px-4">温度 (°C)</th>
+                          <th scope="col" className="py-2 px-4">記録時刻</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {temperatureLog.map((point, index) => (
+                          <tr key={index} className="bg-white border-b">
+                            <td className="py-2 px-4">{formatTime(point.time)}</td>
+                            <td className="py-2 px-4">{point.temperature}°C</td>
+                            <td className="py-2 px-4">{new Date(point.timestamp).toLocaleTimeString()}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </Card>
             </div>
           </div>
         )}
 
         {activeTab === 'history' && (
           <RoastHistoryList 
-            profiles={profiles}
-            onEdit={handleEditProfile}
-            onDelete={deleteProfile}
+            profiles={profiles} 
+            onEdit={handleEditProfile} 
+            onDelete={deleteProfile} 
             onViewChart={handleViewChart}
-            onAddFlavorNotes={handleAddFlavorNotes} // ★新しいpropを渡す
+            onAddFlavorNotes={handleAddFlavorNotes}
             onShare={handleShareProfile}
             onToggleFavorite={handleToggleFavorite}
+            activeTab={activeTab} // activeTab プロパティを渡す
           />
         )}
 
+        {activeTab === 'favorites' && ( // お気に入りタブのコンテンツ
+          <RoastHistoryList 
+            profiles={profiles} 
+            onEdit={handleEditProfile} 
+            onDelete={deleteProfile} 
+            onViewChart={handleViewChart}
+            onAddFlavorNotes={handleAddFlavorNotes}
+            onShare={handleShareProfile}
+            onToggleFavorite={handleToggleFavorite}
+            activeTab={activeTab} // activeTab プロパティを渡す
+          />
+        )}
+
+
         {activeTab === 'profile' && (
-          <div>
-            {!showProfileForm ? (
-              <div>
-                <div className="flex justify-between items-center mb-6">
-                  <h2 className="text-xl font-semibold">プロファイル管理</h2>
-                  <Button onClick={() => setShowProfileForm(true)}>
-                    <Plus size={16} />
-                    新規プロファイル
-                  </Button>
-                </div>
-                
-                {currentProfile ? (
-                  <Card title="アクティブなプロファイル">
-                    <div className="space-y-2">
-                      <p><strong>名前:</strong> {currentProfile.name}</p>
-                      <p><strong>豆:</strong> {currentProfile.bean}</p>
-                      <p><strong>焙煎度:</strong> {currentProfile.roastLevel}</p>
-                      <p><strong>生豆重量:</strong> {currentProfile.weight.green}g</p>
-                      <p><strong>焙煎後重量:</strong> {currentProfile.weight.roasted}g</p>
-                      {currentProfile.notes && <p><strong>メモ:</strong> {currentProfile.notes}</p>}
-                    </div>
-                  </Card>
-                ) : (
-                  <Card>
-                    <p className="text-center text-gray-500 py-8">
-                      アクティブなプロファイルがありません。<br />
-                      新規プロファイルを作成して焙煎を開始しましょう。
-                    </p>
-                  </Card>
-                )}
-              </div>
-            ) : (
-              <RoastProfileForm
-                onSave={handleSaveProfile}
-                onCancel={() => {
-                  setShowProfileForm(false);
-                  setEditingProfile(null);
-                }}
-                currentProfile={editingProfile}
+          <>
+            {showProfileForm ? (
+              <RoastProfileForm 
+                onSave={handleSaveProfile} 
+                onCancel={() => { setShowProfileForm(false); setEditingProfile(null); }} 
+                currentProfile={editingProfile || currentProfile} // 編集中のプロファイルがあればそれを渡す
               />
+            ) : (
+              <Card title="プロファイル管理">
+                <p className="mb-4 text-gray-700">
+                  焙煎を開始する前に、豆の種類や焙煎度などのプロファイルを登録しましょう。
+                  これにより、各焙煎の詳細な記録を残すことができます。
+                </p>
+                <Button onClick={() => { setShowProfileForm(true); setEditingProfile(null); }} variant="primary">
+                  <Plus size={16} />
+                  新しいプロファイルを作成
+                </Button>
+                {/* 既存のプロファイル一覧表示や編集機能は「履歴」タブに統合済み */}
+              </Card>
             )}
-          </div>
+          </>
         )}
       </main>
 
-      {/* チャートモーダル */}
       {selectedProfileForChart && (
         <ChartModal profile={selectedProfileForChart} onClose={handleCloseChartModal} />
       )}
 
-      {/* ★味の感想モーダル */}
       {selectedProfileForFlavorNotes && (
-        <FlavorNotesModal
-          profile={selectedProfileForFlavorNotes}
-          onSave={handleSaveFlavorNotes}
-          onClose={handleCloseFlavorNotesModal}
+        <FlavorNotesModal 
+          profile={selectedProfileForFlavorNotes} 
+          onSave={handleSaveFlavorNotes} 
+          onClose={handleCloseFlavorNotesModal} 
         />
       )}
 
-      {/* ★この共有モーダルを追加します */}
       {shareProfileId && (
-        <ShareProfileModal profileId={shareProfileId} onClose={handleCloseShareModal} />
+        <ShareProfileModal
+          profileId={shareProfileId}
+          onClose={handleCloseShareModal}
+          // shareUrl={`https://your-app-domain.com/share/${shareProfileId}`} // 実際の共有URLに置き換える
+        />
       )}
     </div>
   );
